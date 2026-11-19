@@ -24,6 +24,7 @@ jobs:
       - name: Write config fragment (16K pages + ipset modules)
         run: |
           cat > "$HOME/kernel/ipset16k.fragment" <<'EOF'
+          CONFIG_LOCALVERSION="-16k"
           CONFIG_ARM64_16K_PAGES=y
           CONFIG_IP_SET=m
           CONFIG_IP_SET_BITMAP_IP=m
@@ -58,6 +59,7 @@ jobs:
           echo "==== key config check ===="
           grep -E '^CONFIG_(ARM64_(4K|16K)_PAGES|IP_SET=|IP_SET_HASH_NET=|NETFILTER_XT_SET=|NETFILTER_XT_MATCH_ADDRTYPE=|IP6_NF_NAT=|MODVERSIONS|LTO_|PREEMPT|SMP)' .config | head -30
           test "$(grep -c '^CONFIG_ARM64_16K_PAGES=y' .config)" -eq 1 || { echo 'FATAL: 16K pages not set'; exit 1; }
+          test "$(grep -c '^CONFIG_ARM64_4K_PAGES=y' .config)" -eq 0 || { echo 'FATAL: 4K pages still selected'; exit 1; }
 
       - name: Build kernel + modules
         run: |
