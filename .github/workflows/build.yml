@@ -1,0 +1,108 @@
+name: build-ipset-lkm-16k
+on:
+  workflow_dispatch: {}
+permissions: {}
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 300
+    steps:
+      - name: Free disk space
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /usr/local/share/powershell /usr/share/swift /opt/az /opt/hostedtoolcache/CodeQL /usr/local/.ghcup
+          sudo docker image prune --all --force >/dev/null 2>&1 || true
+          df -h /
+
+      - name: Install build deps
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y bc bison flex libssl-dev libelf-dev clang llvm lld zip
+
+      - name: Clone AOSP android16-6.12 kernel
+        run: git clone --depth 1 -b android16-6.12 https://android.googlesource.com/kernel/common "$HOME/kernel"
+
+      - name: Write config fragment (16K pages + ipset modules)
+        run: |
+          cat > "$HOME/kernel/ipset16k.fragment" <<'EOF'
+          CONFIG_ARM64_16K_PAGES=y
+          CONFIG_IP_SET=m
+          CONFIG_IP_SET_BITMAP_IP=m
+          CONFIG_IP_SET_BITMAP_IPMAC=m
+          CONFIG_IP_SET_BITMAP_PORT=m
+          CONFIG_IP_SET_HASH_IP=m
+          CONFIG_IP_SET_HASH_IPMAC=m
+          CONFIG_IP_SET_HASH_IPMARK=m
+          CONFIG_IP_SET_HASH_IPPORT=m
+          CONFIG_IP_SET_HASH_IPPORTIP=m
+          CONFIG_IP_SET_HASH_IPPORTNET=m
+          CONFIG_IP_SET_HASH_MAC=m
+          CONFIG_IP_SET_HASH_NET=m
+          CONFIG_IP_SET_HASH_NETIFACE=m
+          CONFIG_IP_SET_HASH_NETNET=m
+          CONFIG_IP_SET_HASH_NETPORT=m
+          CONFIG_IP_SET_HASH_NETPORTNET=m
+          CONFIG_IP_SET_LIST_SET=m
+          CONFIG_NETFILTER_XT_SET=m
+          CONFIG_NETFILTER_XT_MATCH_ADDRTYPE=m
+          CONFIG_IP6_NF_NAT=m
+          CONFIG_LTO_NONE=y
+          CONFIG_DEBUG_INFO_NONE=y
+          CONFIG_DEBUG_INFO_BTF=n
+          EOF
+
+      - name: Configure
+        run: |
+          cd "$HOME/kernel"
+          ./scripts/kconfig/merge_config.sh -m arch/arm64/configs/gki_defconfig ipset16k.fragment
+          make ARCH=arm64 LLVM=1 LLVM_IAS=1 olddefconfig
+          echo "==== key config check ===="
+          grep -E '^CONFIG_(ARM64_(4K|16K)_PAGES|IP_SET=|IP_SET_HASH_NET=|NETFILTER_XT_SET=|NETFILTER_XT_MATCH_ADDRTYPE=|IP6_NF_NAT=|MODVERSIONS|LTO_|PREEMPT|SMP)' .config | head -30
+          test "$(grep -c '^CONFIG_ARM64_16K_PAGES=y' .config)" -eq 1 || { echo 'FATAL: 16K pages not set'; exit 1; }
+
+      - name: Build kernel + modules
+        run: |
+          cd "$HOME/kernel"
+          make ARCH=arm64 LLVM=1 LLVM_IAS=1 -j"$(nproc)" all
+
+      - name: Collect modules
+        run: |
+          cd "$HOME/kernel"
+          mkdir -p "$HOME/out"
+          find . -name '*.ko' | grep -E '(ip_set_|xt_set\.ko|xt_addrtype\.ko|ip6table_nat\.ko)' | while read -r f; do cp "$f" "$HOME/out/"; done
+          ls -la "$HOME/out"
+          echo "==== vermagic of each ===="
+          for f in "$HOME"/out/*.ko; do echo "$(basename "$f"): $(strings "$f" | grep '^vermagic=' | head -1)"; done
+
+      - name: Zero __versions section (replicate IPSET-LKM cross-GKI trick)
+        run: |
+          python3 - <<'PY'
+          import struct, glob, os
+          for path in sorted(glob.glob(os.path.expanduser('~/out/*.ko'))):
+              data = bytearray(open(path, 'rb').read())
+              assert data[:4] == b'\x7fELF'
+              e_shoff = struct.unpack_from('<Q', data, 0x28)[0]
+              e_shentsize = struct.unpack_from('<H', data, 0x3a)[0]
+              e_shnum = struct.unpack_from('<H', data, 0x3c)[0]
+              e_shstrndx = struct.unpack_from('<H', data, 0x3e)[0]
+              def hdr(i): return e_shoff + i * e_shentsize
+              strh = hdr(e_shstrndx)
+              stroff = struct.unpack_from('<Q', data, strh + 0x18)[0]
+              strsz = struct.unpack_from('<Q', data, strh + 0x20)[0]
+              shstr = bytes(data[stroff:stroff + strsz])
+              for i in range(e_shnum):
+                  h = hdr(i)
+                  noff = struct.unpack_from('<I', data, h)[0]
+                  nm = shstr[noff:shstr.index(b'\x00', noff)].decode()
+                  if nm == '__versions':
+                      sz = struct.unpack_from('<Q', data, h + 0x20)[0]
+                      print(os.path.basename(path), '__versions', sz, '-> 0')
+                      struct.pack_into('<Q', data, h + 0x20, 0)
+              open(path, 'wb').write(bytes(data))
+          print('ALL PATCHED')
+          PY
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ipset-lkm-16k
+          path: /home/runner/out/
