@@ -70,7 +70,7 @@ jobs:
         run: |
           cd "$HOME/kernel"
           mkdir -p "$HOME/out"
-          find . -name '*.ko' | grep -E '(ip_set_|xt_set\.ko|xt_addrtype\.ko|ip6table_nat\.ko)' | while read -r f; do cp "$f" "$HOME/out/"; done
+          find . -name '*.ko' | grep -E '(ip_set_|ip_set\.ko|xt_set\.ko|xt_addrtype\.ko|ip6table_nat\.ko)' | while read -r f; do cp "$f" "$HOME/out/"; done
           ls -la "$HOME/out"
           echo "==== vermagic of each ===="
           for f in "$HOME"/out/*.ko; do echo "$(basename "$f"): $(strings "$f" | grep '^vermagic=' | head -1)"; done
